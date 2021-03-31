@@ -1,12 +1,11 @@
-# -*- coding:utf-8 -*-
 import requests
-
-__author__ = 'CuiXinyu'
-
 from bs4 import BeautifulSoup
 import time
+import multiprocessing
 
-defaultencoding = 'utf-8'
+# -*- coding:utf-8 -*-
+__author__ = 'Cui Xin yu'
+default_encoding = 'utf-8'
 
 
 def get_proxy():
@@ -20,8 +19,9 @@ def delete_proxy(proxy):
 # github爬虫类
 class GHCrawler:
     # 初始化方法，定义一些变量
-    def __init__(self, _topic):
+    def __init__(self, _topic, project_number=500, sort_options="o=desc"):
         self.pageIndex = 1
+        self.page_number = project_number / 10
         self.user_agent = 'Opera/9.80 (Windows NT 6.1; U; en) Presto/2.8.131 Version/11.11'
         # 初始化headers
         # self.headers = {'User-Agent': self.user_agent}
@@ -31,83 +31,92 @@ class GHCrawler:
         }
 
         # 存放段子的变量，每一个元素是每一页的段子们
-        self.repo_full_names = []
+        self.repo_full_names = set()
         # 存放程序是否继续运行的变量
         self.enable = False
         self.topic = topic
+        self.file_name = self.topic + ".txt"
+
+        self.sort_options = sort_options
 
     # 传入某一页的索引获得页面代码
-    def getPage(self, pageIndex, sort_options):
+    def getPage(self, url):
         # print project_number,sort_options,search_content+"========="
-        url = 'https://github.com/search?' + str(sort_options) + '&q=' + str(self.topic) + '&p=' + str(
-            pageIndex) + '&l=java'
+        # url = 'http://github.com/search?' + str(self.sort_options) + '&q=' + str(self.topic) + '&p=' + str(
+        #     page_index) + '&l=java'
         print("url is : " + url)
-
-        # 构建请求的request
-        # req = request.Request(url, headers=self.headers)
-        # # # 利用urlopen获取页面代码
-        # response = request.urlopen(req)
-        # # 将页面转化为UTF-8编码
-        # pageCode = response.read().decode('utf-8')
-        retry_count = 50000
-        proxy = get_proxy().get("proxy")
+        retry_count = 10
         while retry_count > 0:
             try:
-                time.sleep(0.5)
-                response = requests.get(url, headers=self.headers, proxies={"https": "https://{}".format(proxy)})
+                # time.sleep(0.5)
                 # 使用代理访问
+                proxy = get_proxy().get("proxy")
+                proxies = {
+                    "http": "http://{}".format(proxy),
+                    "https": "https://{}".format(proxy),
+                }
+                response = requests.get(url, headers=self.headers, proxies=proxies, timeout=10, verify=False)
                 return response.text
-            except Exception as e:
-                print("The server couldn't fulfill the request.")
+            except requests.exceptions.RequestException:
+                retry_count = retry_count - 1
+                print("The server couldn't fulfill the request, switch proxy...")
 
         return None
 
-    # 传入某一页代码，返回本页不带图片的段子列表
-    def getPageItems(self, pageIndex, sort_options):
-        # print project_number,sort_options,search_content+"===="
-        pageCode = self.getPage(pageIndex, sort_options)
-        # print pageCode
-        if not pageCode:
-            print("页面加载失败....")
-            return None
+    def extract_info(self, url):
+        pageCode = self.getPage(url)
+        while not pageCode:
+            print("页面加载失败, 重新加载中")
+            pageCode = self.getPage(url)
         soup = BeautifulSoup(pageCode, "html.parser")
         items = soup.find_all(class_="repo-list-item")
-        file_name = self.topic + ".txt"
-        f = open(file_name, "a+")
+        if len(items) != 10:
+            print("项目列表未完全加载, 重新加载中...")
+            return self.extract_info(url)
+        return items
+
+    def getPageItems(self, url):
+        items = self.extract_info(url)
+        repo_set = set()
         for item in items:
             tmp = item.contents[3].contents[1].contents[1]['href']
             print(tmp)
-            f.writelines(tmp[1:] + "\n")
-            # print(item.contents[3].contents[1].contents[1]['href'])
-            # self.repo_full_names.append(item.contents[3].contents[1].contents[1]['href'])
-
-    # 加载并提取页面的内容，加入到列表中
-    # def loadPage(self, pageIndex, sort_options):
-    #     # print project_number,sort_options,search_content
-    #     self.getPageItems(self.pageIndex, sort_options)
+            repo_set.add(tmp)
+        return repo_set
 
     # 取规定数量个数内容
-    def saveRes2Txt(self):
-        file_name = self.topic + ".txt"
-        f = open(file_name, "w+")
-        for repo_full_name in self.repo_full_names:
+    def saveRes2Txt(self, repo_set):
+        f = open(self.file_name, "a+")
+        for repo_full_name in repo_set:
             f.writelines(repo_full_name[1:] + "\n")
         f.close()
 
     # 开始方法
-    def start(self, page_number, sort_options):
+    def start(self):
         print(u"正在读取github页面，搜索内容为：" + self.topic)
-        # print project_number,sort_options,search_content
         # 使变量为True，程序可以正常运行
         self.enable = True
         # 先加载一页内容
-        while self.pageIndex <= page_number:
-            self.getPageItems(self.pageIndex, sort_options)
-            time.sleep(0.5)
-            self.pageIndex += 1
-        # print("saving results to txt...")
-        # self.saveRes2Txt()
-        # print("finished")
+        cpus = multiprocessing.cpu_count()
+        pool = multiprocessing.Pool(cpus if cpus < 4 else 4)
+        page_index = 1
+        url_list = []
+        while page_index <= self.page_number:
+            url = 'http://github.com/search?' + str(self.sort_options) + '&q=' + str(self.topic) + '&p=' + str(
+                page_index) + '&l=java'
+            url_list.append(url)
+            page_index += 1
+        # print(url_list)
+        for url in url_list:
+            pool.apply_async(self.getPageItems, args=(url,), callback=self.saveRes2Txt)
+        # pool.apply_async(self.getPageItems, args=(page_index,), callback=self.saveRes2Txt)
+        # time.sleep(0.5)
+        #
+        # # print("saving results to txt...")
+        # # self.saveRes2Txt()
+        # # print("finished")
+        pool.close()
+        pool.join()
 
 
 def getSortOptions(argument):
@@ -123,15 +132,9 @@ def getSortOptions(argument):
     return switcher.get(argument, "nothing")
 
 
-# 自定义搜索内容
-topic = "html"
-spider = GHCrawler(topic.replace(" ", "+"))
-# 自定义爬取个数
-project_number = 50
-page_number = project_number / 10
-# 自定义/量化（0：最流行，1：不流行，2：复刻/克隆最多，3：克隆最少，4：最近更新，5：近期最少更新）
-options = 6
-sort_options = getSortOptions(options)
-print(sort_options)
-
-spider.start(page_number, sort_options)
+if __name__ == '__main__':
+    # 自定义搜索内容
+    topic = "spring"
+    spider = GHCrawler(topic.replace(" ", "+"), 500, getSortOptions(6))
+    # 自定义/量化（0：最流行，1：不流行，2：复刻/克隆最多，3：克隆最少，4：最近更新，5：近期最少更新）
+    spider.start()
